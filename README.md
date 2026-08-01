@@ -1,6 +1,6 @@
 # TESLA-updates — Windows 11 Pro STIG / Hardening Script
 
-A modernized fork of [Angry-Joe/Standalone-Windows-STIG-Script](https://github.com/Angry-Joe/Standalone-Windows-STIG-Script) (originally by [@SimeonOnSecurity](https://github.com/simeononsecurity)), updated for hardening **Windows 11 Pro** client machines.
+A modernized fork of [Angry-Joe/Standalone-Windows-STIG-Script](https://github.com/Angry-Joe/Standalone-Windows-STIG-Script) (originally by [@SimeonOnSecurity](https://github.com/simeononsecurity)), updated for hardening **Windows 11 Pro** client machines. Bundled DoD GPO baselines are current as of the **July 2026 DISA STIG GPO package** (Windows 11 STIG v2r8).
 
 **Note:** Review and test this script before running it on production hardware. It makes over a thousand configuration changes, and neither the original authors nor this fork's maintainers take responsibility for broken systems. Take a backup (the script also attempts a System Restore point) and keep BitLocker suspended until the post-run reboot completes.
 
@@ -34,8 +34,28 @@ A modernized fork of [Angry-Joe/Standalone-Windows-STIG-Script](https://github.c
 - `PSWindowsUpdate` now installs from PowerShell Gallery when online (bundled copy remains as an offline fallback, installed to the proper Program Files module path instead of System32).
 - Comment-based help header and top-of-file `#Requires -RunAsAdministrator`.
 
+### Refreshed DoD GPO baselines (July 2026 DISA package)
+The GPO backups under `Files\GPOs\DoD\` were replaced wholesale with the contents of **U_STIG_GPO_Package_July_2026.zip** from [public.cyber.mil](https://public.cyber.mil/stigs/gpo/):
+
+| Section | Baseline now bundled | Replaced |
+|---|---|---|
+| Windows | DoD Windows 11 v2r8 | Windows 10/8 era GPOs |
+| Defender | Microsoft Defender Antivirus STIG v2r9 | older Defender GPO |
+| Edge | Microsoft Edge v2r5 | Edge V1R2 |
+| Chrome | Google Chrome v2r11 | Chrome V2R4 |
+| FireFox | Mozilla Firefox v6r8 | Firefox V5R2 |
+| Office | Office 2019-M365 Apps v3r4 | Office 2013/2016/2019 GPOs |
+| Firewall | Windows Defender Firewall v2r2 | Firewall V1R7 |
+| Adobe | Acrobat Pro / Reader DC Continuous V2R1 | same (unchanged upstream) |
+| IE11 | Internet Explorer 11 v2r7 (section off by default) | IE11 V1R19 |
+
+Notes on the swap:
+- **The `windows` section now imports Windows 11 GPOs only.** If you must harden a Windows 10 machine, drop the `DoD Windows 10 v3r6` folder from the DISA package into `Files\GPOs\DoD\Windows\` instead.
+- **Office GPOs now cover Office 2019 / Microsoft 365 Apps only** — DISA no longer ships Office 2013/2016 baselines. If the client runs old Office, keep the old fork around.
+- The VMware `Horizon` GPOs and the `SoS` extras (Firefox, OneDrive) are carried over unchanged — DISA's package doesn't include them.
+- To refresh again next quarter: download the latest package, and for each product copy the contents of its `GPOs\` folder into a named subfolder of the matching `Files\GPOs\DoD\<section>\` (the script feeds each subfolder to `Files\LGPO\LGPO.exe /g`, which finds every GPO backup beneath it).
+
 ### Still bundled from the original (know what you're running)
-- The DoD GPO backups under `Files\GPOs` date from the original repo's last update. DISA has since released newer baselines (e.g., **Microsoft Windows 11 STIG V2R6, April 2026**). The GPO import mechanism is unchanged, so you can refresh the contents of `Files\GPOs\DoD\` with the latest [DISA GPO package](https://public.cyber.mil/stigs/gpo/) at any time — the folder layout just needs to match (one GPO backup folder per subdirectory, imported via `Files\LGPO\LGPO.exe`).
 - The `mitigations` section still disables Windows Script Host and hibernation, and blocks untrusted fonts. These are sound for a hardened laptop but can surprise users (no `cscript`/`wscript` logon scripts, no hibernate/fast-startup). Run with `-mitigations $false` if that's a problem.
 
 ## Requirements
