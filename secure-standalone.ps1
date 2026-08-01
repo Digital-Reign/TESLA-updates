@@ -1,4 +1,18 @@
-﻿
+﻿#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    Standalone Windows STIG / hardening script - TESLA-updates fork.
+.DESCRIPTION
+    Modernized for Windows 11 (tested against Windows 11 Pro clients).
+    Originally by SimeonOnSecurity (Standalone-Windows-STIG-Script).
+    Fork changes: Windows 11 Pro edition awareness, retired IE11/JRE8/Horizon
+    defaults, removed legacy (EdgeHTML) Edge tweaks, bug fixes, and updated
+    PowerShell practices. See README.md for the full change list.
+.NOTES
+    Run from an elevated PowerShell prompt in the repo root.
+    A reboot is required after completion.
+#>
+
 param(
     [Parameter(Mandatory = $false)]
     [bool]$cleargpos = $true,
@@ -10,8 +24,10 @@ param(
     [bool]$firefox = $true,
     [Parameter(Mandatory = $false)]
     [bool]$chrome = $true,
+    # Internet Explorer 11 was retired in June 2022 and is disabled on
+    # Windows 11. The policies are harmless but pointless - off by default.
     [Parameter(Mandatory = $false)]
-    [bool]$IE11 = $true,
+    [bool]$IE11 = $false,
     [Parameter(Mandatory = $false)]
     [bool]$edge = $true,
     [Parameter(Mandatory = $false)]
@@ -20,8 +36,9 @@ param(
     [bool]$office = $true,
     [Parameter(Mandatory = $false)]
     [bool]$onedrive = $true,
+    # Oracle JRE 8 is rarely present on modern clients - off by default.
     [Parameter(Mandatory = $false)]
-    [bool]$java = $true,
+    [bool]$java = $false,
     [Parameter(Mandatory = $false)]
     [bool]$windows = $true,
     [Parameter(Mandatory = $false)]
@@ -32,45 +49,54 @@ param(
     [bool]$mitigations = $true,
     [Parameter(Mandatory = $false)]
     [bool]$nessusPID = $true,
+    # VMware Horizon agent/client STIGs - not applicable to most laptops.
     [Parameter(Mandatory = $false)]
-    [bool]$horizon = $true
+    [bool]$horizon = $false
 )
 
 ######SCRIPT FOR FULL INSTALL AND CONFIGURE ON STANDALONE MACHINE#####
 #Continue on error
 $ErrorActionPreference = 'silentlycontinue'
 
-#Require elivation for script run
-#Requires -RunAsAdministrator
-
 #Set Directory to PSScriptRoot
 if ((Get-Location).Path -NE $PSScriptRoot) { Set-Location $PSScriptRoot }
 
-$paramscheck = $cleargpos, $installupdates, $adobe, $firefox, $chrome, $IE11, $edge, $dotnet, $office, $onedrive, $java, $windows, $defender, $firewall, $mitigations, $nessusPID, $sosoptional
+# OS / edition awareness (Windows 11 Pro vs Enterprise)
+$osInfo = Get-CimInstance -ClassName Win32_OperatingSystem
+$osCaption = $osInfo.Caption
+$osBuild = [int]$osInfo.BuildNumber
+Write-Host "Detected OS: $osCaption (Build $osBuild)" -ForegroundColor Cyan
+if ($osBuild -lt 22000) {
+    Write-Warning "This fork targets Windows 11 (build 22000+). Windows 10 will mostly work, but is no longer the tested platform."
+}
+if ($osCaption -notmatch 'Enterprise|Education') {
+    Write-Warning "Non-Enterprise edition detected. Enterprise-only features (Credential Guard, AppLocker enforcement, Application Guard) cannot be enabled on Pro; related GPO settings will simply not take effect. Windows 11 Pro still supports BitLocker, WDAC, memory integrity (HVCI), LSA protection, and Defender ASR rules."
+}
 
-# run a warning if no options are set to true
-if ($paramscheck | Where-Object { $_ -eq $false } | Select-Object -Count -EQ $params.Count) {
+$paramscheck = $cleargpos, $installupdates, $adobe, $firefox, $chrome, $IE11, $edge, $dotnet, $office, $onedrive, $java, $windows, $defender, $firewall, $mitigations, $nessusPID, $horizon
+
+# exit if every section was disabled
+if (-not ($paramscheck -contains $true)) {
     Write-Error "No Options Were Selected. Exiting..."
     Exit
 }
 
-# if any parameters are set to true take a restore point
+# take a restore point before making changes
 $date = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $scriptName = $MyInvocation.MyCommand.Name
-if ($paramscheck | Where-Object { $_ } | Select-Object) {
-    $freespace = (Get-WmiObject -class Win32_LogicalDisk | Where-Object { $_.DeviceID -eq 'C:' }).FreeSpace
-    $minfreespace = 10000000000 #10GB
-    if ($freespace -gt $minfreespace) {
-        Write-Host "Taking a Restore Point Before Continuing...."
-        $job = Start-Job -Name "Take Restore Point" -ScriptBlock {
-            New-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion\SystemRestore' -Name 'SystemRestorePointCreationFrequency' -PropertyType DWORD -Value 0 -Force
-            Checkpoint-Computer -Description "RestorePoint $scriptName $date" -RestorePointType "MODIFY_SETTINGS"
-        }
-        Wait-Job -Job $job
+$freespace = (Get-CimInstance -ClassName Win32_LogicalDisk | Where-Object { $_.DeviceID -eq 'C:' }).FreeSpace
+$minfreespace = 10000000000 #10GB
+if ($freespace -gt $minfreespace) {
+    Write-Host "Taking a Restore Point Before Continuing...."
+    $job = Start-Job -Name "Take Restore Point" -ArgumentList $scriptName, $date -ScriptBlock {
+        param($scriptName, $date)
+        New-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion\SystemRestore' -Name 'SystemRestorePointCreationFrequency' -PropertyType DWORD -Value 0 -Force
+        Checkpoint-Computer -Description "RestorePoint $scriptName $date" -RestorePointType "MODIFY_SETTINGS"
     }
-    else {
-        Write-Output "Not enough disk space to create a restore point. Current free space: $(($freespace/1GB)) GB"
-    }
+    Wait-Job -Job $job
+}
+else {
+    Write-Output "Not enough disk space to create a restore point. Current free space: $(($freespace/1GB)) GB"
 }
 
 # Install Local Group Policy if Not Already Installed
@@ -116,16 +142,26 @@ else {
 
 if ($installupdates -eq $true) {
     Write-Host "Installing the Latest Windows Updates" -ForegroundColor Green
-    #Install PowerShell Modules
-    Copy-Item -Path .\Files\"PowerShell Modules"\* -Destination C:\Windows\System32\WindowsPowerShell\v1.0\Modules -Force -Recurse
-    #Unblock New PowerShell Modules
-    Get-ChildItem C:\Windows\System32\WindowsPowerShell\v1.0\Modules\PSWindowsUpdate\ -recurse | Unblock-File
-    #Install PSWindowsUpdate
-    Import-Module -Name PSWindowsUpdate -Force -Global 
+    #Prefer the current PSWindowsUpdate from PSGallery; fall back to the bundled copy when offline
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
+        try {
+            if (-not (Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue)) {
+                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ErrorAction Stop | Out-Null
+            }
+            Install-Module -Name PSWindowsUpdate -Force -Scope AllUsers -ErrorAction Stop
+        }
+        catch {
+            Write-Warning "PSGallery unavailable - falling back to the bundled PSWindowsUpdate module."
+            Copy-Item -Path .\Files\"PowerShell Modules"\* -Destination "$env:ProgramFiles\WindowsPowerShell\Modules" -Force -Recurse
+            Get-ChildItem "$env:ProgramFiles\WindowsPowerShell\Modules\PSWindowsUpdate" -Recurse | Unblock-File
+        }
+    }
+    Import-Module -Name PSWindowsUpdate -Force -Global
 
     #Install Latest Windows Updates
     Start-Job -Name "Windows Updates" -ScriptBlock {
-        Install-WindowsUpdate -MicrosoftUpdate -AcceptAll; Get-WuInstall -AcceptAll -IgnoreReboot; Get-WuInstall -AcceptAll -Install -IgnoreReboot
+        Install-WindowsUpdate -MicrosoftUpdate -AcceptAll -IgnoreReboot
     }
 }
 else {
@@ -226,14 +262,14 @@ else {
 }
 
 if ($edge -eq $true) {
-    Write-Host "Implementing the Microsoft Edge STIGs" -ForegroundColor Green
+    Write-Host "Implementing the Microsoft Edge (Chromium) STIGs" -ForegroundColor Green
     Import-GPOs -gposdir ".\Files\GPOs\DoD\Edge"
 
     #InPrivate browsing in Microsoft Edge must be disabled.
-    Set-ItemProperty -Path "HKLM:\Software\Policies\Microsoft\MicrosoftEdge\Main" -Name "AllowInPrivate" -Type "DWORD" -Value 0 -Force
-    #Windows 10 must be configured to prevent Microsoft Edge browser data from being cleared on exit.
-    New-Item -Path "HKLM:\Software\Policies\Microsoft\MicrosoftEdge\" -Name "Privacy" -Force
-    Set-ItemProperty -Path "HKLM:\Software\Policies\Microsoft\MicrosoftEdge\Privacy" -Name ClearBrowsingHistoryOnExit -Type "DWORD" -Value 0 -Force
+    New-Item -Path "HKLM:\Software\Policies\Microsoft\" -Name "Edge" -Force
+    Set-ItemProperty -Path "HKLM:\Software\Policies\Microsoft\Edge" -Name "InPrivateModeAvailability" -Type "DWORD" -Value 1 -Force
+    #Browsing data must not be cleared on exit.
+    Set-ItemProperty -Path "HKLM:\Software\Policies\Microsoft\Edge" -Name "ClearBrowsingDataOnExit" -Type "DWORD" -Value 0 -Force
 }
 else {
     Write-Output "The Microsoft Edge Section Was Skipped..."
@@ -606,19 +642,22 @@ if ($windows -eq $true) {
     New-Item -Path "HKLM:\Software\Policies\Microsoft\Internet Explorer" -Name "Feeds" -Force
     Set-ItemProperty -Path "HKLM:\Software\Policies\Microsoft\Internet Explorer\Feeds" -Name "AllowBasicAuthInClear" -Type "DWORD" -Value 0 -Force
     #Check for publishers certificate revocation must be enforced.
-    New-Item -Path "HKLM:\Software\Microsoft\Windows\Current Version\WinTrust\Trust Providers\" -Name "Software Publishing" -Force
-    Set-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\Current Version\WinTrust\Trust Providers\Software Publishing" -Name State -Type "DWORD" -Value 146432 -Force
-    New-Item -Path "HKCU:\Software\Microsoft\Windows\Current Version\WinTrust\Trust Providers\" -Name "Software Publishing" -Force
-    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\Current Version\WinTrust\Trust Providers\Software Publishing" -Name State -Type "DWORD" -Value 146432 -Force
+    #(fork fix: registry key is "CurrentVersion" - the original wrote to a nonexistent "Current Version" path)
+    New-Item -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\WinTrust\Trust Providers\" -Name "Software Publishing" -Force
+    Set-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\WinTrust\Trust Providers\Software Publishing" -Name State -Type "DWORD" -Value 146432 -Force
+    New-Item -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\WinTrust\Trust Providers\" -Name "Software Publishing" -Force
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\WinTrust\Trust Providers\Software Publishing" -Name State -Type "DWORD" -Value 146432 -Force
     #AutoComplete feature for forms must be disallowed.
-    New-Item -Path "HKLM:\Software\Policies\Microsoft\Internet Explorer\" -Name "Main Criteria" -Force
-    Set-ItemProperty -Path "HKLM:\Software\Policies\Microsoft\Internet Explorer\Main Criteria" -Name "Use FormSuggest" -Type "String" -Value no -Force
-    New-Item -Path "HKCU:\Software\Policies\Microsoft\Internet Explorer\" -Name "Main Criteria" -Force
-    Set-ItemProperty -Path "HKCU:\Software\Policies\Microsoft\Internet Explorer\Main Criteria" -Name "Use FormSuggest" -Type "String" -Value no -Force
+    #(fork fix: key is "Internet Explorer\Main" - the original wrote to "Main Criteria")
+    New-Item -Path "HKLM:\Software\Policies\Microsoft\Internet Explorer\" -Name "Main" -Force
+    Set-ItemProperty -Path "HKLM:\Software\Policies\Microsoft\Internet Explorer\Main" -Name "Use FormSuggest" -Type "String" -Value no -Force
+    New-Item -Path "HKCU:\Software\Policies\Microsoft\Internet Explorer\" -Name "Main" -Force
+    Set-ItemProperty -Path "HKCU:\Software\Policies\Microsoft\Internet Explorer\Main" -Name "Use FormSuggest" -Type "String" -Value no -Force
     #Turn on the auto-complete feature for user names and passwords on forms must be disabled.
-    Set-ItemProperty -Path "HKLM:\Software\Policies\Microsoft\Internet Explorer\Main Criteria" -Name "FormSuggest PW Ask" -Type "String" -Value no -Force
-    Set-ItemProperty -Path "HKCU:\Software\Policies\Microsoft\Internet Explorer\Main Criteria" -Name "FormSuggest PW Ask" -Type "String" -Value no -Force
-    #Windows 10 must be configured to prioritize ECC Curves with longer key lengths first.
+    Set-ItemProperty -Path "HKLM:\Software\Policies\Microsoft\Internet Explorer\Main" -Name "FormSuggest PW Ask" -Type "String" -Value no -Force
+    Set-ItemProperty -Path "HKCU:\Software\Policies\Microsoft\Internet Explorer\Main" -Name "FormSuggest PW Ask" -Type "String" -Value no -Force
+    #Windows must be configured to prioritize ECC Curves with longer key lengths first.
+    New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Cryptography\Configuration\SSL\" -Name "00010002" -Force
     Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Cryptography\Configuration\SSL\00010002" -Name "EccCurves" -Type "MultiString" -Value "NistP384 NistP256" -Force
     #Zone information must be preserved when saving attachments.
     New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Attachments\" -Name "Main Criteria" -Force
@@ -642,6 +681,18 @@ if ($windows -eq $true) {
     #The use of a hardware security device with Windows Hello for Business must be enabled.
     New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft" -Name "PassportForWork" -Force
     Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\PassportForWork\" -Name "RequireSecurityDevice" -Type "DWORD" -Value 1 -Force
+
+    #--- Windows 11 STIG additions (fork) ---
+    #SMBv1 must not be installed (WN11-00-000160/165/170).
+    Disable-WindowsOptionalFeature -Online -FeatureName "SMB1Protocol" -NoRestart | Out-Null
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters" -Name "SMB1" -Type "DWORD" -Value 0 -Force
+    #Windows PowerShell 2.0 must not be installed (WN11-00-000155).
+    Disable-WindowsOptionalFeature -Online -FeatureName "MicrosoftWindowsPowerShellV2Root" -NoRestart | Out-Null
+    #LSA protection (RunAsPPL) must be enabled (WN11-00-000175 equivalent).
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "RunAsPPL" -Type "DWORD" -Value 1 -Force
+    #Restrict print driver installation to administrators (PrintNightmare mitigation / WN11-00-000395).
+    New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers\" -Name "PointAndPrint" -Force
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers\PointAndPrint" -Name "RestrictDriverInstallationToAdministrators" -Type "DWORD" -Value 1 -Force
 }
 else {
     Write-Output "The Windows Desktop Section Was Skipped..."
@@ -689,19 +740,21 @@ if ($mitigations -eq $true) {
         #Enable SEHOP
         Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel" -Name "DisableExceptionChainValidation" -Type "DWORD" -Value 0 -Force
     
-        #Disable NetBIOS by updating Registry
+        #Disable NetBIOS over TCP/IP on all interfaces
+        #(fork fix: the original only read the value back - it never set NetbiosOptions = 2)
         #http://blog.dbsnet.fr/disable-netbios-with-powershell#:~:text=Disabling%20NetBIOS%20over%20TCP%2FIP,connection%2C%20then%20set%20NetbiosOptions%20%3D%202
         $key = "HKLM:SYSTEM\CurrentControlSet\services\NetBT\Parameters\Interfaces"
-        Get-ChildItem $key | ForEach-Object { 
+        Get-ChildItem $key | ForEach-Object {
             Write-Host("Modify $key\$($_.pschildname)")
+            Set-ItemProperty -Path "$key\$($_.pschildname)" -Name "NetbiosOptions" -Type "DWORD" -Value 2 -Force
             $NetbiosOptions_Value = (Get-ItemProperty "$key\$($_.pschildname)").NetbiosOptions
             Write-Host("NetbiosOptions updated value is $NetbiosOptions_Value")
         }
-        
+
         #Disable WPAD
         #https://adsecurity.org/?p=3299
         New-Item -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\" -Name "Wpad" -Force
-        New-Item -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Wpad" -Name "Wpad" -Force
+        New-Item -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\" -Name "Wpad" -Force
         Set-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Wpad" -Name "WpadOverride" -Type "DWORD" -Value 1 -Force
         Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Wpad" -Name "WpadOverride" -Type "DWORD" -Value 1 -Force
     
@@ -720,8 +773,9 @@ if ($mitigations -eq $true) {
         Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\SecurityProviders\Wdigest" -Name "UseLogonCredential" -Type "DWORD" -Value 0 -Force
     
         #Block Untrusted Fonts
+        #(fork fix: value is hex 0x1000000000000 - the original passed the digits as a decimal, setting the wrong bit)
         #https://adsecurity.org/?p=3299
-        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Kernel\" -Name "MitigationOptions" -Type "QWORD" -Value "1000000000000" -Force
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Kernel\" -Name "MitigationOptions" -Type "QWORD" -Value 0x1000000000000 -Force
         
         #Disable Office OLE
         #https://adsecurity.org/?p=3299
@@ -747,11 +801,13 @@ if ($nessusPID -eq $true) {
         # https://github.com/VectorBCO/windows-path-enumerate/blob/development/Windows_Path_Enumerate.ps1
         ForEach ($i in 1..2) {
             # Get all services
+            #(fork fix: the original used "If ($i = 1)" assignments instead of "-eq" comparisons,
+            # so both passes ran against every hive on every iteration)
             $FixParameters = @()
-            If ($i = 1) {
+            If ($i -eq 1) {
                 $FixParameters += @{"Path" = "HKLM:\SYSTEM\CurrentControlSet\Services\" ; "ParamName" = "ImagePath" }
             }
-            If ($i = 2) {
+            If ($i -eq 2) {
                 $FixParameters += @{"Path" = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\" ; "ParamName" = "UninstallString" }
                 # If OS x64 - adding paths for x86 programs
                 If (Test-Path "$($env:SystemDrive)\Program Files (x86)\") {
@@ -765,14 +821,13 @@ if ($nessusPID -eq $true) {
                     $RegistryPath = $_.name -Replace 'HKEY_LOCAL_MACHINE', 'HKLM:' -replace $SpCharREGEX, '`$1'
                     $OriginalPath = (Get-ItemProperty "$RegistryPath")
                     $ImagePath = $OriginalPath.$($FixParameter.ParamName)
-                    If ($i = 1, 2) {
-                        If ($($OriginalPath.$($FixParameter.ParamName)) -match '%(?''envVar''[^%]+)%') {
-                            $EnvVar = $Matches['envVar']
-                            $FullVar = (Get-ChildItem env: | Where-Object { $_.Name -eq $EnvVar }).value
-                            $ImagePath = $OriginalPath.$($FixParameter.ParamName) -replace "%$EnvVar%", $FullVar
-                            Clear-Variable Matches
-                        } # End If
-                    } # End If $fixEnv
+                    #(fork fix: "If ($i = 1, 2)" was an assignment; env-var expansion applies to every pass)
+                    If ($($OriginalPath.$($FixParameter.ParamName)) -match '%(?''envVar''[^%]+)%') {
+                        $EnvVar = $Matches['envVar']
+                        $FullVar = (Get-ChildItem env: | Where-Object { $_.Name -eq $EnvVar }).value
+                        $ImagePath = $OriginalPath.$($FixParameter.ParamName) -replace "%$EnvVar%", $FullVar
+                        Clear-Variable Matches
+                    } # End If
                     # Get all services with vulnerability
                     If (($ImagePath -like "* *") -and ($ImagePath -notLike '"*"*') -and ($ImagePath -like '*.exe*')) {
                         # Skip MsiExec.exe in uninstall strings

@@ -1,160 +1,109 @@
-# Windows 10 and 11 STIG Script
+# TESLA-updates — Windows 11 Pro STIG / Hardening Script
 
-[![Sponsor](https://img.shields.io/badge/Sponsor-Click%20Here-ff69b4)](https://github.com/sponsors/simeononsecurity) [![Test script against windows docker container](https://github.com/simeononsecurity/Standalone-Windows-STIG-Script/actions/workflows/test-with-docker.yml/badge.svg)](https://github.com/simeononsecurity/Standalone-Windows-STIG-Script/actions/workflows/test-with-docker.yml)[![VirusTotal Scan](https://github.com/simeononsecurity/Standalone-Windows-STIG-Script/actions/workflows/virustotal.yml/badge.svg)](https://github.com/simeononsecurity/Standalone-Windows-STIG-Script/actions/workflows/virustotal.yml)[![PSScriptAnalyzer](https://github.com/simeononsecurity/Standalone-Windows-STIG-Script/actions/workflows/powershell.yml/badge.svg)](https://github.com/simeononsecurity/Standalone-Windows-STIG-Script/actions/workflows/powershell.yml)
+A modernized fork of [Angry-Joe/Standalone-Windows-STIG-Script](https://github.com/Angry-Joe/Standalone-Windows-STIG-Script) (originally by [@SimeonOnSecurity](https://github.com/simeononsecurity)), updated for hardening **Windows 11 Pro** client machines.
 
-**Download all the required files from the [GitHub Repository](https://github.com/simeononsecurity/Standalone-Windows-STIG-Script)**
+**Note:** Review and test this script before running it on production hardware. It makes over a thousand configuration changes, and neither the original authors nor this fork's maintainers take responsibility for broken systems. Take a backup (the script also attempts a System Restore point) and keep BitLocker suspended until the post-run reboot completes.
 
-**Note:** This script should work for most, if not all, systems without issue. While [@SimeonOnSecurity](https://github.com/simeononsecurity) creates, reviews, and tests each repo intensively, we can not test every possible configuration nor does [@SimeonOnSecurity](https://github.com/simeononsecurity) take any responsibility for breaking your system. If something goes wrong, be prepared to submit an [issue](../../issues). Do not run this script if you don't understand what it does. It is your responsibility to review and test the script before running it.
+## What changed in this fork (2026-07)
 
-## Ansible:
-We now offer a playbook collection for this script. Please see the following:
-- [Github Repo](https://github.com/simeononsecurity/Windows_STIG_Ansible)
-- [Ansible Galaxy](https://galaxy.ansible.com/simeononsecurity/windows_stigs)
+### Windows 11 Pro focus
+- **OS/edition detection at startup.** The script now reports the detected OS build and warns when running on anything below Windows 11 (build 22000). On non-Enterprise editions it explains which STIG features simply cannot apply to **Pro** — Credential Guard, AppLocker enforcement, and Application Guard are Enterprise/Education-only. Pro still gets BitLocker, WDAC, memory integrity (HVCI), LSA protection, and Defender ASR hardening, so the bulk of the baseline applies cleanly.
+- **Retired-technology sections now default to off** (each can be re-enabled with its parameter):
+  - `-IE11` — Internet Explorer 11 was retired in June 2022 and is disabled on Windows 11.
+  - `-java` — Oracle JRE 8 with its deployment.config mechanism is rarely present on modern clients.
+  - `-horizon` — VMware Horizon STIGs don't apply to a typical client laptop.
+- **Legacy Edge (EdgeHTML) registry tweaks removed.** The old `HKLM\...\MicrosoftEdge` policies targeted the discontinued UWP Edge. The section now sets the equivalent Chromium Edge policies (`InPrivateModeAvailability`, `ClearBrowsingDataOnExit`) alongside the DoD Edge GPO import.
+- **New Windows 11 STIG items added** to the `-windows` section:
+  - Remove/disable SMBv1 (WN11-00-000160/165/170)
+  - Remove Windows PowerShell 2.0 engine (WN11-00-000155)
+  - Enable LSA protection (`RunAsPPL`)
+  - Restrict print driver installation to administrators (PrintNightmare mitigation)
 
-## Docker:
-We test this script using an automated docker container
-- [DockerHub](https://hub.docker.com/r/simeononsecurity/standalone-windows-stig)
+### Bug fixes to the original script
+- `If ($i = 1)` **assignments** used instead of `-eq` comparisons in the unquoted-service-path section — both registry passes ran on every iteration.
+- The **NetBIOS-disable block never actually disabled NetBIOS** — it only read the value back. It now sets `NetbiosOptions = 2` on every interface.
+- The **untrusted-fonts mitigation set the wrong bit**: the hex value `0x1000000000000` was passed as decimal `"1000000000000"`. Fonts were never blocked.
+- Registry paths corrected: `Current Version` → `CurrentVersion` (publisher certificate revocation) and `Internet Explorer\Main Criteria` → `Internet Explorer\Main` (form autocomplete) — the originals wrote to nonexistent keys.
+- The WPAD HKCU key was created nested one level too deep (`Wpad\Wpad`).
+- The ECC-curve priority key is now created before it is written to.
+- The "no options selected" guard referenced undefined variables and never fired; `$horizon` was missing from the parameter check.
+- The System Restore point job referenced variables outside its scope — the description was always blank.
 
-## Introduction:
+### Modernized PowerShell practice
+- `Get-WmiObject` (removed in PowerShell 7) replaced with `Get-CimInstance`.
+- `PSWindowsUpdate` now installs from PowerShell Gallery when online (bundled copy remains as an offline fallback, installed to the proper Program Files module path instead of System32).
+- Comment-based help header and top-of-file `#Requires -RunAsAdministrator`.
 
-Windows is insecure operating system out of the box and requires many changes to insure [FISMA](https://www.cisa.gov/federal-information-security-modernization-act) compliance. 
-Organizations like [Microsoft](https://microsoft.com), [Cyber.mil](https://public.cyber.mil), the [Department of Defense](https://dod.gov), and the [National Security Agency](https://www.nsa.gov/) have recommended and required configuration changes to lockdown, harden, and secure the operating system and ensure government compliance. These changes cover a wide range of mitigations including blocking telemetry, macros, removing bloatware, and preventing many physical attacks on a system.
+### Still bundled from the original (know what you're running)
+- The DoD GPO backups under `Files\GPOs` date from the original repo's last update. DISA has since released newer baselines (e.g., **Microsoft Windows 11 STIG V2R6, April 2026**). The GPO import mechanism is unchanged, so you can refresh the contents of `Files\GPOs\DoD\` with the latest [DISA GPO package](https://public.cyber.mil/stigs/gpo/) at any time — the folder layout just needs to match (one GPO backup folder per subdirectory, imported via `Files\LGPO\LGPO.exe`).
+- The `mitigations` section still disables Windows Script Host and hibernation, and blocks untrusted fonts. These are sound for a hardened laptop but can surprise users (no `cscript`/`wscript` logon scripts, no hibernate/fast-startup). Run with `-mitigations $false` if that's a problem.
 
-Standalone systems are some of the most difficult and annoying systems to secure. When not automated, they require manual changes of each STIG/SRG. Totalling over 1000 configuration changes on a typical deployment and an average of 5 minutes per change equaling 3.5 days worth of work. This script aims to speed up that process significantly.
+## Requirements
+- Windows 11 Pro or better, fully updated. (Windows 10 and Enterprise editions still work, but this fork tests against 11 Pro.)
+- Run from an **elevated** PowerShell prompt, from the repo root (the script needs `Files\`).
+- **Suspend BitLocker before the first run**; re-enable after the post-run reboot.
+- PowerShell execution policy that allows local scripts (`Set-ExecutionPolicy RemoteSigned -Scope Process`).
+- ~10 GB free disk space for the restore point.
 
-## Notes: 
-
-- This script is designed for operation in **Enterprise** environments and assumes you have hardware support for all the requirements.
-  - For personal systems please see this [GitHub Repository](https://github.com/simeononsecurity/Windows-Optimize-Harden-Debloat)
-- This script is not designed to bring a system to 100% compliance, rather it should be used as a stepping stone to complete most, if not all, the configuration changes that can be scripted. 
-  - Minus system documentation, this collection should bring you up to about 95% compliance on all the STIGS/SRGs applied.
-
-## Requirements:
-- [X] Windows 10 Enterprise is required per STIG.
-- [X] [Standards](https://docs.microsoft.com/en-us/windows-hardware/design/device-experiences/oem-highly-secure) for a highly secure Windows 10 device
-- [X] System is [fully up to date](https://support.microsoft.com/en-gb/help/4027667/windows-10-update)
-  - Run the [Windows 10 Upgrade Assistant](https://support.microsoft.com/en-us/help/3159635/windows-10-update-assistant) to update and verify latest major release.
-- [X] Bitlocker must be suspended or turned off prior to implementing this script, it can be enabled again after rebooting.
-  - Follow-up runs of this script can be run without disabling bitlocker.
-- [X] Hardware Requirements
-  - [Hardware Requirements for Memory Integrity](https://docs.microsoft.com/en-us/windows/security/threat-protection/device-guard/requirements-and-deployment-planning-guidelines-for-virtualization-based-protection-of-code-integrity#baseline-protections) 
-  - [Hardware Requirements for Virtualization-Based Security](https://docs.microsoft.com/en-us/windows-hardware/design/device-experiences/oem-vbs)
-  - [Hardware Requirements for Windows Defender Application Guard](https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-application-guard/reqs-wd-app-guard)
-  - [Hardware Requirements for Windows Defender Credential Guard](https://docs.microsoft.com/en-us/windows/security/identity-protection/credential-guard/credential-guard-requirements)
-  
-## Recommended reading material:
-  - [System Guard Secure Launch](https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-system-guard/system-guard-secure-launch-and-smm-protection#requirements-met-by-system-guard-enabled-machines)
-  - [System Guard Root of Trust](https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-system-guard/system-guard-how-hardware-based-root-of-trust-helps-protect-windows)
-  - [Hardware-based Isolation](https://docs.microsoft.com/en-us/windows/security/threat-protection/microsoft-defender-atp/overview-hardware-based-isolation)
-  - [Memory integrity](https://docs.microsoft.com/en-us/windows/security/threat-protection/device-guard/memory-integrity)
-  - [Windows Defender Application Guard](https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-application-guard/wd-app-guard-overview)
-  - [Windows Defender Credential Guard](https://docs.microsoft.com/en-us/windows/security/identity-protection/credential-guard/credential-guard-how-it-works)
-
-## A list of scripts and tools this collection utilizes:
-- [Cyber.mil - Group Policy Objects](https://public.cyber.mil/stigs/gpo/)
-- [Microsoft Security Compliance Toolkit 1.0](https://www.microsoft.com/en-us/download/details.aspx?id=55319)
-
-## Additional configurations were considered from:
-- [Microsoft - Recommended block rules](https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-application-control/microsoft-recommended-block-rules)
-- [Microsoft - Recommended driver block rules](https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-application-control/microsoft-recommended-driver-block-rules)
-- [Microsoft - Windows Defender Application Control](https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-application-control/windows-defender-application-control-design-guide)
-- [NSACyber - Application Whitelisting Using Microsoft AppLocker](https://apps.nsa.gov/iad/library/ia-guidance/tech-briefs/application-whitelisting-using-microsoft-applocker.cfm)
-- [NSACyber - Hardware-and-Firmware-Security-Guidance](https://github.com/nsacyber/Hardware-and-Firmware-Security-Guidance)
-- [NSACyber - Windows Secure Host Baseline](https://github.com/nsacyber/Windows-Secure-Host-Baseline)
-
-## STIGS/SRGs Applied:
-- [Adobe Acrobat Pro DC Continuous V2R1](https://public.cyber.mil/stigs/downloads/)
-- [Adobe Acrobat Reader DC Continuous V2R1](https://public.cyber.mil/stigs/downloads/)
-- [Firefox V5R2](https://public.cyber.mil/stigs/downloads/)
-- [Google Chrome V2R4](https://public.cyber.mil/stigs/downloads/)
-- [Internet Explorer 11 V1R19](https://public.cyber.mil/stigs/downloads/)
-- [Microsoft Edge V1R2](https://public.cyber.mil/stigs/downloads/)
-- [Microsoft .Net Framework 4 V1R9](https://public.cyber.mil/stigs/downloads/)
-- [Microsoft Office 2013 V2R1](https://public.cyber.mil/stigs/downloads/)
-- [Microsoft Office 2016 V2R1](https://public.cyber.mil/stigs/downloads/)
-- [Microsoft Office 2019/Office 365 Pro Plus V2R3](https://public.cyber.mil/stigs/downloads/)
-- [Microsoft OneDrive STIG V2R1](https://public.cyber.mil/stigs/downloads/)
-- [Oracle JRE 8 V1R5](https://public.cyber.mil/stigs/downloads/)
-- [Windows 10 V2R2](https://public.cyber.mil/stigs/downloads/)
-- [Windows Firewall V1R7](https://public.cyber.mil/stigs/downloads/)
-
-## Editing policies in Local Group Policy after the fact:
-- Import the ADMX Policy definitions from this [repo](https://github.com/simeononsecurity/STIG-Compliant-Domain-Prep/tree/master/Files/PolicyDefinitions) into *C:\windows\PolicyDefinitions* on the system you're trying to modify.
-- Open ```gpedit.msc``` on on the system you're trying to modify. 
-
-
-## How to run the script:
-### Automated Install:
-The script may be launched from the extracted GitHub download like this:
-```powershell
-iex ((New-Object System.Net.WebClient).DownloadString('https://simeononsecurity.ch/scripts/standalonewindows.ps1'))
-```
-**Note**: *This installation version installs all of the configurations. If you seek to customize it, please use the [Manual Install](https://github.com/simeononsecurity/Standalone-Windows-STIG-Script#manual-install)*
-
-### Chocolatey Install:
-Assuming you have [Chocolatey](https://chocolatey.org/install) installed. You may install this script via the following command:
-```powershell
-choco install standalone-windows-stig
-```
-Or view the package on the [Chocolatey Repo](https://community.chocolatey.org/packages/Standalone-Windows-STIG).
-
-**Note**: *The Chocolatey version of this script may lag behind this repo by multiple major versions. We update it sparingly, but stably. Additionally, this version will install all of the configurations. If you seek to customize it, please use the [Manual Install](https://github.com/simeononsecurity/Standalone-Windows-STIG-Script#manual-install)*
-
-### Manual Install:
-If manually downloaded, the script must be launched from the directory containing all the other files from the [GitHub Repository](https://github.com/simeononsecurity/Standalone-Windows-STIG-Script)
-
-All of the parameters in the "secure-standalone.ps1" script are optional, with a default value of $true. This means that if no value is specified for a parameter when the script is run, it will be treated as if it were set to $true.
-
-The script takes the following parameters, all of which are optional and default to $true if not specified:
-
-- **cleargpos**: (Boolean) Clear GPOs not being used
-- **installupdates**: (Boolean) Install updates and reboot if necessary
-- **adobe**: (Boolean) STIG Adobe Reader
-- **firefox**: (Boolean) STIG Firefox
-- **chrome**: (Boolean) STIG Chrome
-- **IE11**: (Boolean) STIG Internet Explorer 11
-- **edge**: (Boolean) STIG Edge
-- **dotnet**: (Boolean) STIG .NET Framework
-- **office**: (Boolean) STIG Office
-- **onedrive**: (Boolean) STIG OneDrive
-- **java**: (Boolean) STIG Java
-- **windows**: (Boolean) STIG Windows
-- **defender**: (Boolean) STIG Windows Defender
-- **firewall**: (Boolean) STIG Windows Firewall
-- **mitigations**: (Boolean) STIG Mitigations
-- **nessusPID**: (Boolean) Resolve Unquoted Strings in Path
-- **horizon**: (Boolean) STIG VMware Horizon
-
-An example of how to run the script with all default parameters would be:
+## How to run
 
 ```powershell
+git clone https://github.com/Digital-Reign/TESLA-updates.git
+cd TESLA-updates
 .\secure-standalone.ps1
 ```
-If you want to specify a different value for one or more of the parameters, you can include them in the command along with their desired value. For example, if you wanted to run the script and set the $firefox parameter to $false, the command would be:
 
-```powershell
-.\secure-standalone.ps1 -firefox $false
-```
+All parameters are optional booleans. Current defaults:
 
-You can also specify multiple parameters in the command like this:
+| Parameter | Default | Purpose |
+|---|---|---|
+| `cleargpos` | `$true` | Wipe and rebuild local group policy before importing |
+| `installupdates` | `$true` | Install latest Windows updates (PSWindowsUpdate) |
+| `adobe` | `$true` | Adobe Acrobat/Reader DC STIG |
+| `firefox` | `$true` | Firefox STIG |
+| `chrome` | `$true` | Google Chrome STIG |
+| `IE11` | **`$false`** | IE11 STIG (retired browser) |
+| `edge` | `$true` | Microsoft Edge (Chromium) STIG |
+| `dotnet` | `$true` | .NET Framework 4 STIG |
+| `office` | `$true` | Microsoft Office STIG |
+| `onedrive` | `$true` | OneDrive STIG |
+| `java` | **`$false`** | Oracle JRE 8 STIG (legacy) |
+| `windows` | `$true` | Windows 10/11 STIG + audit policy + Win11 additions |
+| `defender` | `$true` | Microsoft Defender STIG |
+| `firewall` | `$true` | Windows Firewall STIG |
+| `mitigations` | `$true` | Spectre/Meltdown, LLMNR, NetBIOS, WPAD, WDigest, WSH, fonts, etc. |
+| `nessusPID` | `$true` | Fix unquoted service paths (Nessus 63155) |
+| `horizon` | **`$false`** | VMware Horizon STIG |
+
+Example — skip browser STIGs on a machine that only uses Edge:
 
 ```powershell
 .\secure-standalone.ps1 -firefox $false -chrome $false
 ```
-Note that in this example, both the Firefox and Chrome parameters are set to $false.
 
+**A reboot is required after the script completes.**
 
+## Windows 11 Pro caveats
+| Feature | Pro support |
+|---|---|
+| BitLocker, TPM 2.0, Secure Boot | ✅ |
+| Memory integrity (HVCI) / VBS | ✅ |
+| LSA protection (RunAsPPL) | ✅ |
+| WDAC (App Control for Business) | ✅ |
+| Defender ASR rules | ✅ |
+| Credential Guard | ❌ Enterprise/Education only |
+| AppLocker enforcement | ❌ Enterprise/Education only |
+| Application Guard | ❌ Deprecated by Microsoft |
 
-<a href="https://simeononsecurity.ch" target="_blank" rel="noopener noreferrer">
-  <h2>Explore the World of Cybersecurity</h2>
-</a>
-<a href="https://simeononsecurity.ch" target="_blank" rel="noopener noreferrer">
-  <img src="https://simeononsecurity.ch/img/banner.png" alt="SimeonOnSecurity Logo" width="300" height="300">
-</a>
+GPO settings for unsupported features import without error — they just have no effect on Pro. Document them as "not applicable — edition" in any compliance checklist.
 
-### Links:
-- #### [github.com/simeononsecurity](https://github.com/simeononsecurity)
-- #### [simeononsecurity.ch](https://simeononsecurity.ch)
+## Editing policies after the fact
+- Import the ADMX policy definitions from [STIG-Compliant-Domain-Prep](https://github.com/simeononsecurity/STIG-Compliant-Domain-Prep/tree/master/Files/PolicyDefinitions) into `C:\Windows\PolicyDefinitions`.
+- Open `gpedit.msc`.
 
-
-
+## Sources and credits
+- Original script: [simeononsecurity/Standalone-Windows-STIG-Script](https://github.com/simeononsecurity/Standalone-Windows-STIG-Script)
+- Forked from: [Angry-Joe/Standalone-Windows-STIG-Script](https://github.com/Angry-Joe/Standalone-Windows-STIG-Script)
+- [DoD Cyber Exchange — STIG downloads](https://public.cyber.mil/stigs/downloads/) and [GPO packages](https://public.cyber.mil/stigs/gpo/)
+- [Microsoft Security Compliance Toolkit / LGPO](https://www.microsoft.com/en-us/download/details.aspx?id=55319)
+- [NSACyber — Windows Secure Host Baseline](https://github.com/nsacyber/Windows-Secure-Host-Baseline)
